@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mini Pac-Man</title>
+<style>
+  body { background:#000; color:#fff; font-family: sans-serif; display:flex; flex-direction:column; align-items:center; margin:0; padding:20px; }
+  canvas { background:#000; image-rendering:pixelated; border:4px solid #111; }
+  #hud { margin:12px 0; display:flex; gap:20px; align-items:center; }
+  button { padding:6px 10px; }
+</style>
+</head>
+<body>
+  <h2>Mini Pac-Man</h2>
+  <div id="hud">
+    <div>Score: <span id="score">0</span></div>
+    <div>Lives: <span id="lives">3</span></div>
+    <button id="restart">Restart</button>
+  </div>
+  <canvas id="game" width="420" height="420"></canvas>
+
+<script>
+
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+document.getElementById('restart').onclick = init;
+
+const TILE = 20;
+const ROWS = 20;
+const COLS = 20;
+
+// Map legend: '#' wall, '.' pellet, 'o' power pellet, ' ' empty
+const MAP = [
+"######################",
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"......................".replace(/ /g,''),
+"##### # ##### ##### # #".replace(/ /g,''),
+"#.........##.........#".replace(/ /g,''),
+"#.###.###.##.###.###.#".replace(/ /g,''),
+"#o..#.....  .....#..o#".replace(/ /g,''),
+"###.#.##.#####.##.#.###".replace(/ /g,''),
+"#.....##...#...##.....#".replace(/ /g,''),
+"#.########.#.########.#".replace(/ /g,''),
+"#.....................#".replace(/ /g,''),
+"#######################"
+].map(s => s.padEnd(COLS,' ')).slice(0,ROWS);
+
+// Normalize map: replace spaces used above
+let map = MAP.map(r => r.split(''));
+
+// Player
+let player = { x: 10, y: 15, dir: {x:0,y:0}, nextDir: {x:0,y:0}, speed: 10 };
+
+// Ghost template and instances
+function Ghost(x,y,color) { this.x=x; this.y=y; this.dir={x:0,y:0}; this.color=color; this.vulnerable=0; }
+let ghosts;
+
+// Game state
+let score = 0;
+let lives = 3;
+let powered = 0;
+let lastTime = 0;
+
+function init() {
+  // Deep copy map to place pellets/walls
+  map = MAP.map(r => r.split(''));
+  // Place initial pellets if row char '.' isn't present due to earlier formatting
+  for (let y=0;y<ROWS;y++){
+    for (let x=0;x<COLS;x++){
+      if (map[y][x] === undefined || map[y][x] === ' ') map[y][x] = ' ';
+    }
+  }
+
+  // Ensure there's a pellet floor for simple play (place pellets on all non-wall)
+  for (let y=0;y<ROWS;y++){
+    for (let x=0;x<COLS;x++){
+      if (map[y][x] === ' ') map[y][x] = '.';
+      if (map[y][x] === '#') continue;
+      // keep existing power pellets 'o' if present
+    }
+  }
+  // recreate a few power pellets
+  const powers = [[1,3],[19,3],[1,17],[19,17]];
+  powers.forEach(p => map[p[1]][p[0]] = 'o');
+
+  player = { x: 10, y: 15, dir: {x:0,y:0}, nextDir: {x:0,y:0}, speed: 10 };
+  ghosts = [ new Ghost(9,9,'red'), new Ghost(10,9,'pink'), new Ghost(11,9,'cyan') ];
+  ghosts.forEach(g => { g.dir = {x:1,y:0}; g.vulnerable=0; });
+
+  score = 0;
+  lives = 3;
+  powered = 0;
+  updateHUD();
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
+}
+
+function updateHUD(){ scoreEl.textContent = score; livesEl.textContent = lives; }
+
+function tileAt(x,y){
+  if (y<0||y>=ROWS||x<0||x>=COLS) return '#';
+  return map[y][x];
+}
+
+function canMove(x,y){
+  return tileAt(x,y) !== '#';
+}
+
+// Input
+window.addEventListener('keydown', e=>{
+  const key = e.key;
+  let d = null;
+  if (key === 'ArrowLeft' || key === 'a') d={x:-1,y:0};
+  if (key === 'ArrowRight' || key === 'd') d={x:1,y:0};
+  if (key === 'ArrowUp' || key === 'w') d={x:0,y:-1};
+  if (key === 'ArrowDown' || key === 's') d={x:0,y:1};
+  if (d) player.nextDir = d;
+});
+
+// Movement helpers snapping to grid
+function nearCenter(p){
+  // check if player is near center of tile (to change direction)
+  return (Math.abs((p.x* TILE) - Math.round(p.x* TILE)) < 0.2) && (Math.abs((p.y* TILE) - Math.round(p.y* TILE)) < 0.2);
+}
+
+function moveEntity(e, dt){
+  // move by tile units per second, ensure grid-aligned movement
+  const sp = e.speed || 5;
+  const moveStep = (sp * dt / 1000);
+  // if entity has nextDir and is aligned, allow turn
+  if (e === player && (player.nextDir.x !== 0 || player.nextDir.y !== 0)) {
+    const nx = Math.round(player.x) + player.nextDir.x;
+    const ny = Math.round(player.y) + player.nextDir.y;
+    if (canMove(nx, ny)){
+      player.dir = player.nextDir;
+    }
+  }
+  // attempt to move; if the tile ahead is wall, stop
+  const aheadX = Math.round(e.x + e.dir.x*0.5);
+  const aheadY = Math.round(e.y + e.dir.y*0.5);
+  if (canMove(Math.round(e.x + e.dir.x), Math.round(e.y + e.dir.y))) {
+    e.x += e.dir.x * moveStep;
+    e.y += e.dir.y * moveStep;
+  } else {
+    // stop at center
+    e.x = Math.round(e.x);
+    e.y = Math.round(e.y);
+    if (e !== player) {
+      // pick random new direction at intersection
+      const choices = [];
+      [[1,0],[-1,0],[0,1],[0,-1]].forEach(d=>{
+        if ((-d[0] === e.dir.x && -d[1] === e.dir.y)) return; // avoid reverse ideally
+        if (canMove(Math.round(e.x + d[0]), Math.round(e.y + d[1]))) choices.push({x:d[0],y:d[1]});
+      });
+      if (choices.length) e.dir = choices[Math.floor(Math.random()*choices.length)];
+    }
+  }
+  // warp through tunnels (edges)
+  if (e.x < 0) e.x = COLS-1;
+  if (e.x >= COLS) e.x = 0;
+  if (e.y < 0) e.y = ROWS-1;
+  if (e.y >= ROWS) e.y = 0;
+}
+
+// Collision detection (distance)
+function collide(a,b,thresh=0.6){
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return (dx*dx + dy*dy) < (thresh*thresh);
+}
+
+function loop(now){
+  const dt = now - lastTime;
+  lastTime = now;
+  // Update player movement
+  if (player.dir.x === 0 && player.dir.y === 0 && (player.nextDir.x !==0 || player.nextDir.y!==0)) {
+    // try set direction if possible
+    const nx = Math.round(player.x) + player.nextDir.x;
+    const ny = Math.round(player.y) + player.nextDir.y;
+    if (canMove(nx,ny)) player.dir = player.nextDir;
+  }
+  moveEntity(player, dt);
+
+  // Eat pellet if at center of tile
+  const px = Math.round(player.x), py = Math.round(player.y);
+  const tile = tileAt(px,py);
+  if (tile === '.' ){ score += 10; map[py][px] = ' '; }
+  if (tile === 'o'){ score += 50; map[py][px] = ' '; powered = 7000; ghosts.forEach(g=>g.vulnerable = 7000); }
+  if (tile === ' ' && tile !== '#') { /* nothing */ }
+  if (powered > 0) powered -= dt;
+
+  // Ghosts AI + movement
+  ghosts.forEach(g=>{
+    // decrement vulnerability
+    if (g.vulnerable > 0) g.vulnerable -= dt;
+    // simple chasing when not vulnerable (move towards player sometimes)
+    if (Math.random() < 0.02) {
+      // attempt greedy step towards player
+      const dx = Math.sign(Math.round(player.x) - Math.round(g.x));
+      const dy = Math.sign(Math.round(player.y) - Math.round(g.y));
+      const attempts = [];
+      if (dx) attempts.push({x:dx,y:0});
+      if (dy) attempts.push({x:0,y:dy});
+      attempts.push(...[[1,0],[-1,0],[0,1],[0,-1]].map(d=>({x:d[0],y:d[1]})));
+      for (const a of attempts){
+        if (canMove(Math.round(g.x + a.x), Math.round(g.y + a.y))){
+          g.dir = a; break;
+        }
+      }
+    }
+    moveEntity(g, dt);
+    // at intersections, randomize more
+    if (Math.random() < 0.01) {
+      const choices = [];
+      [[1,0],[-1,0],[0,1],[0,-1]].forEach(d=>{
+        if (!canMove(Math.round(g.x + d[0]), Math.round(g.y + d[1]))) return;
+        choices.push({x:d[0],y:d[1]});
+      });
+      if (choices.length) g.dir = choices[Math.floor(Math.random()*choices.length)];
+    }
+  });
+
+  // Handle collisions between player and ghosts
+  for (const g of ghosts){
+    if (collide(player, g, 0.7)){
+      if (g.vulnerable > 0){
+        // eat ghost: respawn ghost
+        score += 200;
+        g.x = 10; g.y = 9; g.dir = {x:0,y:0}; g.vulnerable = 0;
+      } else {
+        // player loses life, reset positions
+        lives--;
+        updateHUD();
+        if (lives <= 0) { alert('Game Over! Score: '+score); init(); return; }
+        player.x = 10; player.y = 15; player.dir = {x:0,y:0}; player.nextDir = {x:0,y:0};
+        ghosts.forEach(h => { h.x = 9 + ghosts.indexOf(h); h.y = 9; h.dir = {x:0,y:0}; h.vulnerable = 0; });
+        break;
+      }
+    }
+  }
+
+  // Draw
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // draw map
+  for (let y=0;y<ROWS;y++){
+    for (let x=0;x<COLS;x++){
+      const t = map[y][x];
+      const px = x * TILE, py = y * TILE;
+      if (tileAt(x,y) === '#') {
+        ctx.fillStyle = '#001f3f';
+        ctx.fillRect(px,py,TILE,TILE);
+      } else {
+        // pellets
+        if (t === '.') {
+          ctx.fillStyle = '#ffd';
+          ctx.beginPath(); ctx.arc(px+TILE/2, py+TILE/2, 2,0,Math.PI*2); ctx.fill();
+        } else if (t === 'o') {
+          ctx.fillStyle = '#ffd';
+          ctx.beginPath(); ctx.arc(px+TILE/2, py+TILE/2, 5,0,Math.PI*2); ctx.fill();
+        }
+      }
+    }
+  }
+
+  // draw player (Pac-Man)
+  drawPacman(player.x * TILE + TILE/2, player.y * TILE + TILE/2, player.dir);
+
+  // draw ghosts
+  ghosts.forEach(g=>{
+    const x = g.x * TILE + TILE/2, y = g.y * TILE + TILE/2;
+    if (g.vulnerable > 0) ctx.fillStyle = '#88f';
+    else ctx.fillStyle = g.color;
+    ctx.beginPath(); ctx.arc(x, y-2, TILE/2 - 2, Math.PI, 0); ctx.lineTo(x+TILE/2-2,y+TILE/2); ctx.lineTo(x-TILE/2+2,y+TILE/2); ctx.closePath(); ctx.fill();
+    // eyes
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x-6,y-2,3,0,Math.PI*2); ctx.arc(x+4,y-2,3,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(x-6,y-2,1.3,0,Math.PI*2); ctx.arc(x+4,y-2,1.3,0,Math.PI*2); ctx.fill();
+  });
+
+  updateHUD();
+  requestAnimationFrame(loop);
+}
+
+function drawPacman(cx, cy, dir){
+  // mouth direction based on dir
+  const ang = Math.atan2(dir.y || 0, dir.x || 1);
+  const mouth = Math.PI/4;
+  ctx.fillStyle = '#ff0';
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.arc(cx,cy,TILE/2-2, ang + mouth, ang - mouth, false);
+  ctx.closePath();
+  ctx.fill();
+  // eye
+  const ex = cx + (dir.x*3) + (dir.y* -2);
+  const ey = cy + (dir.y*3) + (dir.x*2);
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(ex,ey,2,0,Math.PI*2); ctx.fill();
+}
+
+// start
+init();
+</script>
+</body>
+</html>
